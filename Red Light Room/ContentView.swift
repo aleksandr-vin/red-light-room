@@ -101,7 +101,9 @@ struct ContentView: View {
             }
             Spacer()
             if let completed = completed {
-                Text("\(completed) / \(number)")
+                Text("\(completed) / \(allPhotos.count)")
+            } else {
+                Text("\(allPhotos.count)")
             }
             if (retries > 0) {
                 Text("Retries: \(retries)")
@@ -114,7 +116,7 @@ struct ContentView: View {
         .padding()
     }
 
-    @State private var number = PHAsset.fetchAssets(with: .image, options: nil).count
+    @State private var allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
 
     @State private var completed: Int?
 
@@ -131,7 +133,7 @@ struct ContentView: View {
 
     func backupAndDeletePhotos() {
         let allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
-        number = allPhotos.count
+        let number = allPhotos.count
         print("\(number) assets found")
 
         startTime = Date()
@@ -153,13 +155,15 @@ struct ContentView: View {
 
                 while retryBudget > 0 {
                     do {
-                        try handle(the: asset)
+                        try self.handle(the: asset)
                         break
                     } catch {
                         print("An error occurred: \(error)")
                         retryBudget -= 1
                         if retryBudget > 0 {
-                            retries += 1
+                            DispatchQueue.main.async {
+                                self.retries += 1
+                            }
                         }
                     }
                 }
@@ -171,7 +175,7 @@ struct ContentView: View {
                     let durationInMinutes = durationInSeconds / 60
                     self.operationsPerMinute = Double(self.completed ?? 0) / durationInMinutes
                     if let operationsPerMinute = self.operationsPerMinute, operationsPerMinute > 0 {
-                        self.eta = (Double(self.number) / operationsPerMinute)
+                        self.eta = (Double(number) / operationsPerMinute)
                     }
                 }
 
