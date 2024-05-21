@@ -30,11 +30,11 @@ extension URLSession {
         }
         dataTask.resume()
 
-        print("Waiting for semaphore")
+//        print("Waiting for semaphore")
 
         _ = semaphore.wait(timeout: .distantFuture)
 
-        print("Semaphore awaited")
+//        print("Semaphore awaited")
 
         return (data, response, error)
     }
@@ -51,7 +51,7 @@ extension URLSession {
             response = $1
             error = $2
 
-            if let e = error {
+            if error != nil {
                 print("Error synchronousUploadTask: \(error!.localizedDescription)")
             }
 
@@ -59,11 +59,11 @@ extension URLSession {
         }
         dataTask.resume()
 
-        print("Waiting for semaphore")
+//        print("Waiting for semaphore")
 
         _ = semaphore.wait(timeout: .distantFuture)
 
-        print("Semaphore awaited")
+//        print("Semaphore awaited")
 
         return (data, response, error)
     }
@@ -73,30 +73,75 @@ struct ContentView: View {
 
     var body: some View {
         VStack {
+            Spacer()
+            VStack {
+                if let inputImage = img {
+                    Image(uiImage: inputImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Image(uiImage: UIImage(named: "img-placeholder")!)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }.frame(height: 200, alignment: .center)
+                    .cornerRadius(10)
+//                    .background(Color.blue)
+                    .padding(5)
+//                    .border(Color.blue, width: 5)
+                    .cornerRadius(10)
+            Spacer()
             Image(systemName: "archivebox.fill")
                 .imageScale(.large)
                 .foregroundStyle(.tint)
             Button("Backup and Delete Photos") {
                 backupAndDeletePhotos()
             }
-            Text("\(completed) / \(number)")
+            Spacer()
+            if let completed = completed {
+                Text("\(completed) / \(number)")
+            }
+            if (retries > 0) {
+                Text("Retries: \(retries)")
+            }
+            if let operationsPerMinute = operationsPerMinute {
+                Text("ETA: \(eta) min (\(operationsPerMinute) op/min)")
+            }
+
         }
         .padding()
     }
 
-    var number = PHAsset.fetchAssets(with: .image, options: nil).count
+    @State private var number = PHAsset.fetchAssets(with: .image, options: nil).count
 
-    @State private var completed = 0
+    @State private var completed: Int?
+
+    @State private var img: UIImage? = nil
+
+    @State private var retries = 0
+
+    @State private var operationsPerMinute: Double?
+    @State private var eta: Double = 0.0
+
+    @State private var startTime: Date = Date()
 
     let s = URLSession.shared
 
     func backupAndDeletePhotos() {
         let allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
-        print("\(allPhotos.count) assets found")
+        number = allPhotos.count
+        print("\(number) assets found")
 
-        var budget = 1000
+        startTime = Date()
+
+        var budget = 10000
+
+        let retryBudgetMax = 100
 
         DispatchQueue.global().async {
+
             allPhotos.enumerateObjects { (asset, idx, stop) in
                 guard budget > 0 else {
                     print("Budget depleted. Cannot perform operation.")
@@ -104,10 +149,30 @@ struct ContentView: View {
                     return
                 }
 
-                handle(the: asset)
+                var retryBudget = retryBudgetMax
+
+                while retryBudget > 0 {
+                    do {
+                        try handle(the: asset)
+                        break
+                    } catch {
+                        print("An error occurred: \(error)")
+                        retryBudget -= 1
+                        if retryBudget > 0 {
+                            retries += 1
+                        }
+                    }
+                }
 
                 DispatchQueue.main.async {
-                    self.completed += 1
+                    self.completed = (self.completed ?? 0) + 1
+
+                    let durationInSeconds = Date().timeIntervalSince(startTime)
+                    let durationInMinutes = durationInSeconds / 60
+                    self.operationsPerMinute = Double(self.completed ?? 0) / durationInMinutes
+                    if let operationsPerMinute = self.operationsPerMinute, operationsPerMinute > 0 {
+                        self.eta = (Double(self.number) / operationsPerMinute)
+                    }
                 }
 
                 budget -= 1
@@ -119,9 +184,9 @@ struct ContentView: View {
         print("Done")
     }
 
-    func checkIfFileExists(at serverURL: URL) -> Bool {
+    func checkIfFileExists(at serverURL: URL, bytes: Int) -> Bool {
 
-        print("checkIfFileExists...")
+//        print("checkIfFileExists...")
 
         var request = URLRequest(url: serverURL)
         request.httpMethod = "HEAD"
@@ -135,14 +200,15 @@ struct ContentView: View {
             return false
         }
 
-        return (response as? HTTPURLResponse)?.statusCode == 200
+        return (response as? HTTPURLResponse)?.statusCode == 200 &&
+        (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Length") == "\(bytes)"
     }
 
     enum MyError: Error {
         case runtimeError(String)
     }
 
-    func uploadFile(_ imageData: Data, at uploadURL: URL) {
+    func uploadFile(_ imageData: Data, at uploadURL: URL) throws {
         //guard let imageData = image.jpegData(compressionQuality: 0.5) else { return }
 
         var request = URLRequest(url: uploadURL)
@@ -160,18 +226,18 @@ struct ContentView: View {
         request.httpMethod = "PUT"
         request.httpBody = imageData
 
-        print("Uploading image...")
+//        print("Uploading image...")
 
         let (_, response, error) = s.synchronousUploadTask(with: request, data: imageData)
 
         if let error = error {
             print("Upload error: \(error)")
-            return
+            throw MyError.runtimeError("Upload error: \(error)")
         }
         guard let response = response as? HTTPURLResponse,
               (200...299).contains(response.statusCode) else {
             print("Server error")
-            return
+            throw MyError.runtimeError("Server error")
         }
         print("Upload successful")
     }
@@ -184,49 +250,47 @@ struct ContentView: View {
         options.version = .original
         options.isSynchronous = true
 
-        print("Requesting Image Data")
+//        print("Requesting Image Data")
 
         PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) {
             data = $0
             error = $3
-            print("requestImageData callback")
+//            print("requestImageData callback")
         }
 
-        print("requestImageData done")
+//        print("requestImageData done")
 
         return (data, error)
     }
 
-    func handle(the asset: PHAsset) -> Void {
+    func handle(the asset: PHAsset) throws -> Void {
         let fileName = PHAssetResource.assetResources(for: asset)[0].originalFilename
         print("\(asset.localIdentifier) : \(fileName) - \(asset.creationDate?.description ?? "unknown")")
         // For each photo, request the image data
 
         let uploadURL = URL(string: "http://Aleksandrs-MacBook-Air.local:8080/\(fileName.replacingOccurrences(of: "/", with: "_"))")!
 
-        do {
-            if (checkIfFileExists(at: uploadURL)) {
-                print("File already exists at \(uploadURL)")
-                return
-            } else {
-                print("File does not exist at \(uploadURL)")
-                let (data, error) = try requestImageData(for: asset)
+        let (data, error) = try requestImageData(for: asset)
 //                if let error = error {
 //                    print("requestImageData error: \(error)")
 //                    return
 //                }
-                if let data = data {
-                    uploadFile(data, at: uploadURL)
-                }
-
+        if let data = data {
+            DispatchQueue.main.async {
+                self.img = UIImage(data: data) ?? UIImage()
+            }
+            if (checkIfFileExists(at: uploadURL, bytes: data.count)) {
+                print("File already exists at \(uploadURL) and size matches")
+                return
+            } else {
+                print("File does not exist at \(uploadURL) or size does not match")
+                try uploadFile(data, at: uploadURL)
                 // Optionally, delete the photo after backing it up
                 // Remember to run deletion code on the main thread if affecting the UI
                 //            PHPhotoLibrary.shared().performChanges({
                 //                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
                 //            })
             }
-        } catch {
-            print("An error occurred: \(error)")
         }
     }
 }
