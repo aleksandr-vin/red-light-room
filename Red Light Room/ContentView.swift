@@ -93,28 +93,37 @@ struct ContentView: View {
 //                    .border(Color.blue, width: 5)
                     .cornerRadius(10)
             Spacer()
+            Slider(value: $oneRunBudget, in: 0...500, step: 1)
+                .disabled(inAction)
+                .padding()
             Image(systemName: "archivebox.fill")
                 .imageScale(.large)
                 .foregroundStyle(.tint)
-            Button("Backup and Delete Photos") {
+            Button("Backup and Delete \(Int(oneRunBudget)) Photos") {
                 backupAndDeletePhotos()
-            }
+            }.padding()
+                .disabled(inAction)
             Spacer()
             if let completed = completed {
-                Text("\(completed) / \(allPhotos.count)")
+                let value = Double(completed)
+                let total = Double(Int(oneRunBudget))
+                ProgressView(value: value, total: total) {
+                    Text("\(completed) / \(Int(oneRunBudget))")
+                }
             } else {
                 Text("\(allPhotos.count)")
             }
-            if (retries > 0) {
-                Text("Retries: \(retries)")
-            }
             if let operationsPerMinute = operationsPerMinute {
-                Text("ETA: \(eta) min (\(operationsPerMinute) op/min)")
+                Text("ETA: \(eta) min (\(operationsPerMinute) op/min)").foregroundColor(.secondary)
             }
-
+            if (retries > 0) {
+                Text("Retries: \(retries)").foregroundColor(.secondary)
+            }
         }
         .padding()
     }
+
+    @State private var progress: Double? = nil
 
     @State private var allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
 
@@ -129,63 +138,113 @@ struct ContentView: View {
 
     @State private var startTime: Date = Date()
 
+    @State private var oneRunBudget: Double = 3.0
+
+    @State private var inAction: Bool = false
+
+    @State private var forDeletion: [PHAsset] = Array()
+
     let s = URLSession.shared
 
+    func requestPhotoLibraryAccess(completion: @escaping (Bool) -> Void) {
+        let status = PHPhotoLibrary.authorizationStatus()
+        switch status {
+        case .authorized, .limited:
+            completion(true)
+        case .denied, .restricted:
+            completion(false)
+        case .notDetermined:
+            PHPhotoLibrary.requestAuthorization { newStatus in
+                completion(newStatus == .authorized || newStatus == .limited)
+            }
+        @unknown default:
+            completion(false)
+        }
+    }
+
     func backupAndDeletePhotos() {
-        let allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
-        let number = allPhotos.count
-        print("\(number) assets found")
+        requestPhotoLibraryAccess { granted in
+            guard granted else {
+                print("Access to photo library denied.")
+                return
+            }
+            let allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
+            let number = allPhotos.count
+            print("\(number) assets found")
 
-        startTime = Date()
+            startTime = Date()
 
-        var budget = 10000
+            var budget = self.oneRunBudget
+            self.inAction = true
 
-        let retryBudgetMax = 100
+            let retryBudgetMax = 100
 
-        DispatchQueue.global().async {
+            self.forDeletion.removeAll(keepingCapacity: true)
 
-            allPhotos.enumerateObjects { (asset, idx, stop) in
-                guard budget > 0 else {
-                    print("Budget depleted. Cannot perform operation.")
-                    stop.pointee = true
-                    return
-                }
+            DispatchQueue.global().async {
 
-                var retryBudget = retryBudgetMax
+                allPhotos.enumerateObjects { (asset, idx, stop) in
+                    guard budget > 0 else {
+                        print("Budget depleted. Cannot perform operation.")
+                        stop.pointee = true
+                        return
+                    }
 
-                while retryBudget > 0 {
-                    do {
-                        try self.handle(the: asset)
-                        break
-                    } catch {
-                        print("An error occurred: \(error)")
-                        retryBudget -= 1
-                        if retryBudget > 0 {
-                            DispatchQueue.main.async {
-                                self.retries += 1
+                    var retryBudget = retryBudgetMax
+
+                    while retryBudget > 0 {
+                        do {
+                            try self.handle(the: asset)
+                            break
+                        } catch {
+                            print("An error occurred: \(error)")
+                            retryBudget -= 1
+                            if retryBudget > 0 {
+                                DispatchQueue.main.async {
+                                    self.retries += 1
+                                }
                             }
                         }
                     }
+
+                    DispatchQueue.main.async {
+                        self.forDeletion.append(asset)
+
+                        self.completed = (self.completed ?? 0) + 1
+
+                        let durationInSeconds = Date().timeIntervalSince(startTime)
+                        let durationInMinutes = durationInSeconds / 60
+                        self.operationsPerMinute = Double(self.completed ?? 0) / durationInMinutes
+                        if let operationsPerMinute = self.operationsPerMinute, operationsPerMinute > 0 {
+                            self.eta = (Double(Int(self.oneRunBudget)) / operationsPerMinute)
+                        }
+                    }
+
+                    budget -= 1
                 }
 
                 DispatchQueue.main.async {
-                    self.completed = (self.completed ?? 0) + 1
-
-                    let durationInSeconds = Date().timeIntervalSince(startTime)
-                    let durationInMinutes = durationInSeconds / 60
-                    self.operationsPerMinute = Double(self.completed ?? 0) / durationInMinutes
-                    if let operationsPerMinute = self.operationsPerMinute, operationsPerMinute > 0 {
-                        self.eta = (Double(number) / operationsPerMinute)
+                    // Optionally, delete the photo after backing it up
+                    // Remember to run deletion code on the main thread if affecting the UI
+                    print("Deleting \(self.forDeletion.count) assets...")
+                    PHPhotoLibrary.shared().performChanges({
+                        PHAssetChangeRequest.deleteAssets(self.forDeletion as NSArray)
+                    }) { success, error in
+                        if success {
+                            print("Successfully deleted \(self.forDeletion.count) assets")
+                        } else if let error = error {
+                            print("Failed to delete \(self.forDeletion.count) assets: \(error.localizedDescription)")
+                        }
                     }
+
+                    self.inAction = false
                 }
-
-                budget -= 1
             }
+
+            //handle(the: allPhotos.firstObject!)
+
+            print("Done")
         }
-
-        //handle(the: allPhotos.firstObject!)
-
-        print("Done")
     }
 
     func checkIfFileExists(at serverURL: URL, bytes: Int) -> Bool {
@@ -289,11 +348,6 @@ struct ContentView: View {
             } else {
                 print("File does not exist at \(uploadURL) or size does not match")
                 try uploadFile(data, at: uploadURL)
-                // Optionally, delete the photo after backing it up
-                // Remember to run deletion code on the main thread if affecting the UI
-                //            PHPhotoLibrary.shared().performChanges({
-                //                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
-                //            })
             }
         }
     }

@@ -13,6 +13,10 @@
             <!-- Optional: Specify minimum TLS version -->
             <key>NSTemporaryExceptionMinimumTLSVersion</key>
             <string>TLSv1.2</string>
+	    <key>NSPhotoLibraryUsageDescription</key>
+	    <string>We need access to your photo library to backup and delete photos.</string>
+	    <key>NSPhotoLibraryAddUsageDescription</key>
+	    <string>We need permission to delete photos after backing them up.</string>
         </dict>
     </dict>
 </dict>
