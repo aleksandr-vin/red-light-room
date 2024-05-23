@@ -167,6 +167,8 @@ struct ContentView: View {
     @State private var backupCompleted: Int = 0
     @State private var completed: Int = 0
 
+    @State private var activeEffectiveBudget: Int = 0
+
     @State private var img: UIImage? = nil
 
     @State private var retries = 0
@@ -185,7 +187,12 @@ struct ContentView: View {
     let s = URLSession.shared
 
     func effectiveBudget() -> Int {
-        return self.allPhotos.count
+        // During backup process we don't want progress bars to readjust the totals
+        if self.backupInAction {
+            return self.activeEffectiveBudget
+        } else {
+            return self.allPhotos.count
+        }
     }
 
     func requestPhotoLibraryAccess(completion: @escaping (Bool) -> Void) {
@@ -253,6 +260,7 @@ struct ContentView: View {
 
             DispatchQueue.main.async {
                 self.backupInAction = true
+                self.activeEffectiveBudget = budget
                 self.backupCompleted = 0
                 self.completed = 0
                 self.forDeletion.removeAll(keepingCapacity: true)
