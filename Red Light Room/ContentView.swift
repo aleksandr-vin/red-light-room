@@ -93,41 +93,79 @@ struct ContentView: View {
 //                    .border(Color.blue, width: 5)
                     .cornerRadius(10)
             Spacer()
-            Slider(value: $oneRunBudget, in: 0...500, step: 1)
-                .disabled(inAction)
-                .padding()
-            Image(systemName: "archivebox.fill")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Button("Backup and Delete \(Int(oneRunBudget)) Photos") {
-                backupAndDeletePhotos()
-            }.padding()
-                .disabled(inAction)
-            Spacer()
-            if let completed = completed {
-                let value = Double(completed)
-                let total = Double(Int(oneRunBudget))
-                ProgressView(value: value, total: total) {
-                    Text("\(completed) / \(Int(oneRunBudget))")
-                }
-            } else {
+//            Slider(value: $oneRunBudget, in: 0...500, step: 1)
+//                .disabled(inAction)
+//                .padding()
+            HStack {
+                Image(systemName: "archivebox.fill")
+                    .imageScale(.large)
+                    .foregroundStyle(.tint)
                 Text("\(allPhotos.count)")
             }
-            if let operationsPerMinute = operationsPerMinute {
-                Text("ETA: \(eta) min (\(operationsPerMinute) op/min)").foregroundColor(.secondary)
+            Spacer()
+            VStack {
+                let total = Double(Int(effectiveBudget()))
+                let value = total - Double(backupCompleted)
+                ProgressView(value: value, total: total) {
+                    Text("Enqueued for backup")
+                } currentValueLabel: {
+                    Text("\(Int(effectiveBudget()) - backupCompleted) / \(Int(effectiveBudget()))")
+                }
             }
-            if (retries > 0) {
-                Text("Retries: \(retries)").foregroundColor(.secondary)
+            if backupInAction {
+                Button("Stop") {
+                    stop()
+                }.padding()
+                    .disabled(!backupInAction)
+            } else {
+                Button("Backup Assets") {
+                    backupPhotos()
+                }.padding()
+                    .disabled(backupInAction || effectiveBudget() <= 0)
+            }
+            VStack {
+                let value = Double(forDeletion.count)
+                let total = Double(Int(effectiveBudget()))
+                ProgressView(value: value, total: total) {
+                    Text("Backed-up & enqueued for deletion")
+                } currentValueLabel: {
+                    Text("\(forDeletion.count) / \(Int(effectiveBudget()))")
+                }
+            }
+            Button("Delete \(forDeletion.count) Assets") {
+                deletePhotos()
+            }.padding()
+                .disabled(deleteInAction || forDeletion.count == 0)
+            VStack {
+                let value = Double(completed)
+                let total = Double(Int(effectiveBudget()))
+                ProgressView(value: value, total: total) {
+                    Text("Backed-up & deleted")
+                } currentValueLabel: {
+                    Text("\(completed) / \(Int(effectiveBudget()))")
+                }
+            }
+            Spacer()
+            VStack {
+                if let operationsPerMinute = operationsPerMinute {
+                    Text("ETA: \(String(format: "%.0f", eta)) min (\(String(format: "%.0f", operationsPerMinute)) op/min)").foregroundColor(.secondary)
+                } else {
+                    Text(" ")
+                }
+                if (retries > 0) {
+                    Text("Retries: \(retries)").foregroundColor(.secondary)
+                } else {
+                    Text(" ")
+                }
             }
         }
         .padding()
     }
 
-    @State private var progress: Double? = nil
-
     @State private var allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
 
-    @State private var completed: Int?
+    @State private var backupCompleted: Int = 0
+    @State private var completed: Int = 0
 
     @State private var img: UIImage? = nil
 
@@ -138,13 +176,17 @@ struct ContentView: View {
 
     @State private var startTime: Date = Date()
 
-    @State private var oneRunBudget: Double = 3.0
-
-    @State private var inAction: Bool = false
+    @State private var backupInAction: Bool = false
+    @State private var deleteInAction: Bool = false
+    @State private var needsToStop: Bool = false
 
     @State private var forDeletion: [PHAsset] = Array()
 
     let s = URLSession.shared
+
+    func effectiveBudget() -> Int {
+        return self.allPhotos.count
+    }
 
     func requestPhotoLibraryAccess(completion: @escaping (Bool) -> Void) {
         let status = PHPhotoLibrary.authorizationStatus()
@@ -162,24 +204,62 @@ struct ContentView: View {
         }
     }
 
-    func backupAndDeletePhotos() {
+    func stop() {
+        DispatchQueue.main.async {
+            self.needsToStop = true
+        }
+    }
+
+    func deletePhotos() {
+        self.deleteInAction = true
+
+        print("Deleting \(self.forDeletion.count) assets...")
+
+        let forImmediateDeletion: Array = self.forDeletion
+
+        PHPhotoLibrary.shared().performChanges({
+            PHAssetChangeRequest.deleteAssets(forImmediateDeletion as NSArray)
+        }) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    print("Successfully deleted \(forImmediateDeletion.count) assets")
+
+                    self.completed += forImmediateDeletion.count
+
+                    // Removing deleted elelemtns from the [forDelete] array
+                    self.forDeletion = self.forDeletion.filter { !forImmediateDeletion.contains($0) }
+
+                    self.allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
+                } else if let error = error {
+                    print("Failed to delete \(forImmediateDeletion.count) assets: \(error.localizedDescription)")
+                }
+                self.deleteInAction = false
+            }
+        }
+    }
+
+    func backupPhotos() {
         requestPhotoLibraryAccess { granted in
             guard granted else {
                 print("Access to photo library denied.")
                 return
             }
+
             let allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
             let number = allPhotos.count
             print("\(number) assets found")
 
-            startTime = Date()
+            var budget = self.effectiveBudget()
 
-            var budget = self.oneRunBudget
-            self.inAction = true
+            DispatchQueue.main.async {
+                self.backupInAction = true
+                self.backupCompleted = 0
+                self.completed = 0
+                self.forDeletion.removeAll(keepingCapacity: true)
+                startTime = Date()
+            }
 
             let retryBudgetMax = 100
-
-            self.forDeletion.removeAll(keepingCapacity: true)
 
             DispatchQueue.global().async {
 
@@ -210,13 +290,18 @@ struct ContentView: View {
                     DispatchQueue.main.async {
                         self.forDeletion.append(asset)
 
-                        self.completed = (self.completed ?? 0) + 1
+                        self.backupCompleted = self.backupCompleted + 1
 
                         let durationInSeconds = Date().timeIntervalSince(startTime)
                         let durationInMinutes = durationInSeconds / 60
-                        self.operationsPerMinute = Double(self.completed ?? 0) / durationInMinutes
+                        self.operationsPerMinute = Double(self.backupCompleted) / durationInMinutes
                         if let operationsPerMinute = self.operationsPerMinute, operationsPerMinute > 0 {
-                            self.eta = (Double(Int(self.oneRunBudget)) / operationsPerMinute)
+                            self.eta = (Double(Int(self.effectiveBudget())) / operationsPerMinute)
+                        }
+
+                        if self.needsToStop {
+                            self.needsToStop = false
+                            budget = 0
                         }
                     }
 
@@ -224,20 +309,7 @@ struct ContentView: View {
                 }
 
                 DispatchQueue.main.async {
-                    // Optionally, delete the photo after backing it up
-                    // Remember to run deletion code on the main thread if affecting the UI
-                    print("Deleting \(self.forDeletion.count) assets...")
-                    PHPhotoLibrary.shared().performChanges({
-                        PHAssetChangeRequest.deleteAssets(self.forDeletion as NSArray)
-                    }) { success, error in
-                        if success {
-                            print("Successfully deleted \(self.forDeletion.count) assets")
-                        } else if let error = error {
-                            print("Failed to delete \(self.forDeletion.count) assets: \(error.localizedDescription)")
-                        }
-                    }
-
-                    self.inAction = false
+                    self.backupInAction = false
                 }
             }
 
