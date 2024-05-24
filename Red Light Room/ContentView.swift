@@ -100,7 +100,7 @@ struct ContentView: View {
                 Image(systemName: "archivebox.fill")
                     .imageScale(.large)
                     .foregroundStyle(.tint)
-                Text("\(allPhotos.count)")
+                Text("\(allPhotos.count + allVideos.count)")
             }
             Spacer()
             VStack {
@@ -163,6 +163,7 @@ struct ContentView: View {
     }
 
     @State private var allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
+    @State private var allVideos = PHAsset.fetchAssets(with: .video, options: nil)
 
     @State private var backupCompleted: Int = 0
     @State private var completed: Int = 0
@@ -191,7 +192,7 @@ struct ContentView: View {
         if self.backupInAction {
             return self.activeEffectiveBudget
         } else {
-            return self.allPhotos.count
+            return self.allPhotos.count + self.allVideos.count
         }
     }
 
@@ -237,6 +238,7 @@ struct ContentView: View {
                     self.forDeletion = self.forDeletion.filter { !forImmediateDeletion.contains($0) }
 
                     self.allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
+                    self.allVideos = PHAsset.fetchAssets(with: .video, options: nil)
                 } else if let error = error {
                     print("Failed to delete \(forImmediateDeletion.count) assets: \(error.localizedDescription)")
                 }
@@ -253,7 +255,8 @@ struct ContentView: View {
             }
 
             let allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
-            let number = allPhotos.count
+            let allVideos = PHAsset.fetchAssets(with: .video, options: nil)
+            let number = allPhotos.count + allVideos.count
             print("\(number) assets found")
 
             var budget = self.effectiveBudget()
@@ -269,15 +272,14 @@ struct ContentView: View {
 
             let retryBudgetMax = 100
 
-            DispatchQueue.global().async {
+            func foo(_ asset: PHAsset, _ idx: Int, _ stop: UnsafeMutablePointer<ObjCBool>) {
+                guard budget > 0 else {
+                    print("Budget depleted. Cannot perform operation.")
+                    stop.pointee = true
+                    return
+                }
 
-                allPhotos.enumerateObjects { (asset, idx, stop) in
-                    guard budget > 0 else {
-                        print("Budget depleted. Cannot perform operation.")
-                        stop.pointee = true
-                        return
-                    }
-
+                autoreleasepool {
                     var retryBudget = retryBudgetMax
 
                     while retryBudget > 0 {
@@ -294,34 +296,38 @@ struct ContentView: View {
                             }
                         }
                     }
+                }
 
-                    DispatchQueue.main.async {
-                        self.forDeletion.append(asset)
+                DispatchQueue.main.async {
+                    self.forDeletion.append(asset)
 
-                        self.backupCompleted = self.backupCompleted + 1
+                    self.backupCompleted = self.backupCompleted + 1
 
-                        let durationInSeconds = Date().timeIntervalSince(startTime)
-                        let durationInMinutes = durationInSeconds / 60
-                        self.operationsPerMinute = Double(self.backupCompleted) / durationInMinutes
-                        if let operationsPerMinute = self.operationsPerMinute, operationsPerMinute > 0 {
-                            self.eta = (Double(Int(self.effectiveBudget())) / operationsPerMinute)
-                        }
-
-                        if self.needsToStop {
-                            self.needsToStop = false
-                            budget = 0
-                        }
+                    let durationInSeconds = Date().timeIntervalSince(startTime)
+                    let durationInMinutes = durationInSeconds / 60
+                    self.operationsPerMinute = Double(self.backupCompleted) / durationInMinutes
+                    if let operationsPerMinute = self.operationsPerMinute, operationsPerMinute > 0 {
+                        self.eta = (Double(Int(self.effectiveBudget())) / operationsPerMinute)
                     }
 
-                    budget -= 1
+                    if self.needsToStop {
+                        self.needsToStop = false
+                        budget = 0
+                    }
                 }
+
+                budget -= 1
+            }
+
+            DispatchQueue.global().async {
+
+                allPhotos.enumerateObjects { (asset, idx, stop) in foo(asset, idx, stop) }
+                allVideos.enumerateObjects { (asset, idx, stop) in foo(asset, idx, stop) }
 
                 DispatchQueue.main.async {
                     self.backupInAction = false
                 }
             }
-
-            //handle(the: allPhotos.firstObject!)
 
             print("Done")
         }
@@ -358,13 +364,17 @@ struct ContentView: View {
 
         if uploadURL.path.lowercased().hasSuffix(".heic") {
             request.setValue("image/heic", forHTTPHeaderField: "Content-Type")
-        } else if uploadURL.path.lowercased().hasSuffix(".jpg") {
+        } else if uploadURL.path.lowercased().hasSuffix(".jpg") || uploadURL.path.lowercased().hasSuffix(".jpeg") {
             request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
         } else if uploadURL.path.lowercased().hasSuffix(".png") {
             request.setValue("image/png", forHTTPHeaderField: "Content-Type")
+        } else if uploadURL.path.lowercased().hasSuffix(".mov") {
+            request.setValue("video/quicktime", forHTTPHeaderField: "Content-Type")
+        } else if uploadURL.path.lowercased().hasSuffix(".mp4") {
+            request.setValue("video/mp4", forHTTPHeaderField: "Content-Type")
         } else {
             print("Unsupported suffix")
-            return
+            throw MyError.runtimeError("Unsupported suffix")
         }
         request.httpMethod = "PUT"
         request.httpBody = imageData
@@ -406,6 +416,33 @@ struct ContentView: View {
         return (data, error)
     }
 
+    func requestVideoData(for asset: PHAsset) throws -> Data? {
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .highQualityFormat
+        options.version = .original
+
+        var data: Data?
+
+        let semaphore = DispatchSemaphore(value: 0)
+
+        PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { (avAsset, audioMix, info) in
+            if let avUrlAsset = avAsset as? AVURLAsset {
+                do {
+                    data = try Data(contentsOf: avUrlAsset.url)
+                } catch {
+                    print("Error: \(error)")
+                }
+            }
+
+            semaphore.signal()
+        }
+
+        _ = semaphore.wait(timeout: .distantFuture)
+
+        return data
+    }
+
     func handle(the asset: PHAsset) throws -> Void {
         let fileName = PHAssetResource.assetResources(for: asset)[0].originalFilename
         print("\(asset.localIdentifier) : \(fileName) - \(asset.creationDate?.description ?? "unknown")")
@@ -413,21 +450,36 @@ struct ContentView: View {
 
         let uploadURL = URL(string: "http://Aleksandrs-MacBook-Air.local:8080/\(fileName.replacingOccurrences(of: "/", with: "_"))")!
 
-        let (data, error) = try requestImageData(for: asset)
+        let (data, _) = try requestImageData(for: asset)
 //                if let error = error {
 //                    print("requestImageData error: \(error)")
 //                    return
 //                }
+
         if let data = data {
             DispatchQueue.main.async {
                 self.img = UIImage(data: data) ?? UIImage()
             }
-            if (checkIfFileExists(at: uploadURL, bytes: data.count)) {
-                print("File already exists at \(uploadURL) and size matches")
-                return
+
+            if asset.mediaType == .video {
+                var videoData = try requestVideoData(for: asset)
+                if let videoData = videoData {
+                    if (checkIfFileExists(at: uploadURL, bytes: videoData.count)) {
+                        print("File already exists at \(uploadURL) and size matches")
+                        return
+                    } else {
+                        print("File does not exist at \(uploadURL) or size does not match")
+                        try uploadFile(videoData, at: uploadURL)
+                    }
+                }
             } else {
-                print("File does not exist at \(uploadURL) or size does not match")
-                try uploadFile(data, at: uploadURL)
+                if (checkIfFileExists(at: uploadURL, bytes: data.count)) {
+                    print("File already exists at \(uploadURL) and size matches")
+                    return
+                } else {
+                    print("File does not exist at \(uploadURL) or size does not match")
+                    try uploadFile(data, at: uploadURL)
+                }
             }
         }
     }
